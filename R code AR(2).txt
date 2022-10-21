@@ -1,0 +1,463 @@
+# for optimization function, initial values are random numbers for AR(2), and all ones for spline basis functions
+# knots are placed at equally spaced quantiles
+# investigate #######################F1, F2, and F3
+# to reduce collinearity, one dimension of the spline basis functions is dropped 
+# t_len: time series sample path length
+# J_n: number of inner knots; J_N=J_n + 5 is the total number of knots in the paper 
+# AR parameters: alpha1=0.4; alpha2=0.2
+#                alpha1=0.5; alpha2=0.1;
+
+# investigate #######################F1, F2, F3
+
+
+############################################################################################
+#
+#  A function for setting up the parameter names 
+#
+###########################################################################################
+# no need for intercept, need to make the mean of the random error terms zero
+
+srarma.parameternames <- function(model, xreg){
+  
+  p <- length(model$past_w)
+  q <- length(model$past_z)
+  r <- if(!is.null(xreg)) ncol(xreg) else 0
+  R <- seq(along=numeric(r)) #sequence 1:r if r>0 and empty; note null is different from numeric(0)
+  #Set names of parameters:
+  parameternames <- c(
+    if(p>0){paste("ar", model$past_w, sep="_")}else{NULL}, #parameters for AR
+    if(q>0){paste("ma", model$past_z, sep="_")}else{NULL}, #parameters for MA
+    if(r>0){paste("eta", R, sep="_")}else{NULL} #parameters for covariates
+  )
+  #Use names provided with the covariates when available:
+  if(!is.null(dimnames(xreg)[[2]])) parameternames[1+p+q+R] <- ifelse(dimnames(xreg)[[2]]!="", dimnames(xreg)[[2]], parameternames[1+p+q+R])   
+ return(parameternames)
+}
+
+
+
+##########################################################################################################
+#
+# The function for computing the sum of squares and the score vector
+#
+##########################################################################################################
+
+
+srarma.rer  <- function(paramvec, model, ts, xreg){
+
+
+  n <- length(ts)
+  p <- length(model$past_w)
+  P <- seq(along=numeric(p)) #sequence 1:p if p>0 and NULL otherwise
+  p_max <- max(model$past_w, 0)
+  q <- length(model$past_z)
+  Q <- seq(along=numeric(q)) #sequence 1:q if q>0 and NULL otherwise
+  q_max <- max(model$past_z, 0)
+  Q_max <- seq(along=numeric(q_max))
+  r <- max(ncol(xreg), 0)
+  R <- seq(along=numeric(r)) #sequence 1:r if r>0 and NULL otherwise
+               pq_max <- max(p_max, q_max)
+               
+               
+  parameternames <- srarma.parameternames(model=model, xreg=xreg)
+  
+  names(paramvec)=srarma.parameternames(model=model, xreg=xreg)
+               
+	param <- list( #intercept=paramvec[1],
+                   past_w=paramvec[P],                     # AR 
+                   past_z=paramvec[p+Q],                   # MA
+                   xreg=paramvec[p+q+R] )                  # regressor
+                              
+
+
+  
+  z_t <- c(rep(0, q_max), numeric(n))        
+                                                          
+  w_t <- c(rep(0, p_max), numeric(n))                
+               
+
+  
+  partial_nu <- matrix(0, nrow=n+pq_max, ncol=+p+q+r)  # the partial derivative, no intercept 
+ 
+  X <- matrix(0, nrow=pq_max+n, ncol=r) #regressors are initialized by zero
+  
+	
+	ts<- ts-mean(ts)  # make sure the random error terms are zeros
+	
+	cm<-colMeans(xreg) # make sure the random error terms are zeros
+	xreg = sweep(xreg, 2, cm) # make sure the random error terms are zeros
+	
+	X[pq_max+(1:n), ] <- as.matrix(xreg)
+  						
+	w_t[p_max+(1:n)]=ts-as.matrix(xreg)%*%as.matrix(param$xreg)
+               
+                     
+  for(t in (1:n)){
+    z_t[t+q_max] <- w_t[t+p_max]-sum(param$past_w*w_t[(t-model$past_w)+p_max]) - 
+                              sum(param$past_z*z_t[(t-model$past_z)+q_max])  
+  }   
+               
+  # calculate the sum of squares of z_t
+  srsq= sum(z_t^2)
+               
+                 
+  # recursively update the first derivatives
+               
+               for(t in (1:n)){
+                  partial_nu[t+pq_max, P] <- -w_t[t-model$past_w+p_max] - t(param$past_z) %*% 
+                                                                            partial_nu[(t-model$past_z)+pq_max, P, drop=FALSE]																																			
+									partial_nu[t+pq_max, p+Q] <- -z_t[t-model$past_z+q_max] - t(param$past_z) %*% 
+                                                                  partial_nu[(t-model$past_z)+pq_max, p+Q, drop=FALSE]																													
+									partial_nu[t+pq_max, p+q+R] <- t(param$past_w)%*%X[(t-model$past_w)+pq_max,] - X[t+pq_max, ] - t(param$past_z)%*%
+																	   partial_nu[(t-model$past_z)+pq_max, p+q+R, drop=FALSE] 																				
+										
+																									
+               }
+
+  partial_nu<-partial_nu[-(1:pq_max),]
+  if (q_max>0) z_t <- z_t[-(1:q_max)]
+
+  scorevec <-  colSums(2*z_t*partial_nu)
+               
+               
+  if (any(abs(polyroot(c(1, -param$past_w)))<1) & length(past_w)>0) srsq=10^60 
+  if (any(abs(polyroot(c(1,  param$past_z)))<1) & length(past_z)>0) srsq=10^60  
+               
+               result<-list(score=scorevec, srsq=srsq)
+  }
+
+
+
+###########################################################################################################
+
+##########################################################################################################
+#
+# The function for return the residuals of the fitted model and the sum of squares the score vector, and the model 
+# specification with intercept
+#
+##########################################################################################################
+
+
+srarma.rer.resi  <- function(paramvec, model, ts, xreg){
+
+
+
+
+n <- length(ts)
+  p <- length(model$past_w)
+  P <- seq(along=numeric(p)) #sequence 1:p if p>0 and NULL otherwise
+  p_max <- max(model$past_w, 0)
+  q <- length(model$past_z)
+  Q <- seq(along=numeric(q)) #sequence 1:q if q>0 and NULL otherwise
+  q_max <- max(model$past_z, 0)
+  Q_max <- seq(along=numeric(q_max))
+  r <- max(ncol(xreg), 0)
+  R <- seq(along=numeric(r)) #sequence 1:r if r>0 and NULL otherwise
+               pq_max <- max(p_max, q_max)
+               
+               
+  parameternames <- srarma.parameternames(model=model, xreg=xreg)
+  
+    names(paramvec)=srarma.parameternames(model=model, xreg=xreg)
+               
+		#param <- list( intercept=paramvec[1],
+    #past_w=paramvec[1+P],                      # similar to the observations  
+    #past_z=paramvec[1+p+Q],                   # similar to the conditional mean 
+    #xreg=paramvec[1+p+q+R] )  
+		
+		param <- list( #intercept=paramvec[1],
+                   past_w=paramvec[P],                     # AR 
+                   past_z=paramvec[p+Q],                   # MA
+                   xreg=paramvec[p+q+R] )                  # regressor
+                              
+
+
+  
+  z_t <- c(rep(0, q_max), numeric(n))        
+                                                        
+  w_t <- c(rep(0, p_max), numeric(n))                
+               
+ 
+  partial_nu <- matrix(0, nrow=n+pq_max, ncol=+p+q+r)  # the partial derivative, no intercept 
+	  
+  X <- matrix(0, nrow=pq_max+n, ncol=r) #regressors are initialized by zero
+  
+	
+	mts = mean(ts)    # keep the mean of ts
+	ts<- ts-mts  # make sure the random error terms are zeros
+	
+	cm<-colMeans(xreg) # make sure the random error terms are zeros
+	xreg = sweep(xreg, 2, cm) # make sure the random error terms are zeros
+	
+	X[pq_max+(1:n), ] <- as.matrix(xreg)
+  w_t[p_max+(1:n)]=ts-as.matrix(xreg)%*%as.matrix(param$xreg)
+               
+  for(t in (1:n)){
+    z_t[t+q_max] <- w_t[t+p_max]-sum(param$past_w*w_t[(t-model$past_w)+p_max]) - 
+                              sum(param$past_z*z_t[(t-model$past_z)+q_max])  
+  }   
+               
+  
+  srsq= sum(z_t^2)
+               
+                 
+
+               
+               for(t in (1:n)){
+                  
+                 partial_nu[t+pq_max, P] <- -w_t[t-model$past_w+p_max] - t(param$past_z) %*% 
+                                                                            partial_nu[(t-model$past_z)+pq_max, P, drop=FALSE]																																					
+									partial_nu[t+pq_max, p+Q] <- -z_t[t-model$past_z+q_max] - t(param$past_z) %*% 
+                                                                  partial_nu[(t-model$past_z)+pq_max, p+Q, drop=FALSE]								  
+																													
+									partial_nu[t+pq_max, p+q+R] <- t(param$past_w)%*%X[(t-model$past_w)+pq_max,] - X[t+pq_max, ] - t(param$past_z)%*%
+																	   partial_nu[(t-model$past_z)+pq_max, p+q+R, drop=FALSE] 																				
+										
+																													
+               }
+
+  partial_nu<-partial_nu[-(1:pq_max),]
+  if (q_max>0) z_t <- z_t[-(1:q_max)]  
+               
+  scorevec <-  colSums(2*z_t*partial_nu)
+
+
+             
+  if (any(abs(polyroot(c(1, -param$past_w)))<1) & length(past_w)>0) srsq=10^60 
+  if (any(abs(polyroot(c(1,  param$past_z)))<1) & length(past_z)>0) srsq=10^60  
+       
+			
+			
+r_intercept <- mts + paramvec[p+q+R]%*%cm		
+param_real <- list(intercept= r_intercept[1],
+                   past_w=paramvec[P],                     # AR 
+                   past_z=paramvec[p+Q],                   # MA
+                   xreg=paramvec[p+q+R] )                  # regressor 			
+
+result<-list(score=scorevec, srsq=srsq, residuals=z_t, model = param_real)
+
+}
+
+
+######################################################################
+######################################################################
+
+
+
+############## simulate the data, AR(2) model
+############## the following section can be changed to generate various AR models 
+
+
+
+sigm=1            # variance of the white noise
+t_len=2000          # length of the simulated data
+
+
+#alpha1=0.4; alpha2=0.2;            ####### parameter of ARMA(1,1) process #######
+
+alpha1=0.5; alpha2=0.1;
+
+
+ARP = 0.6   ## phi of AR(1)
+
+
+
+for (i in 1:250){
+
+
+
+x_t=rnorm(t_len*1.2) # normal distribution
+
+
+x_t=arima.sim(n=t_len, list(ar=c(ARP)), innov=x_t)  ## time series for the covariate variable  
+rg=max(x_t)-min(x_t)
+x_t=(x_t-min(x_t)+rg*0.005)/(max(x_t)-min(x_t)+rg*0.01)
+
+
+#fx_t = 1-6*x_t+36*x_t^2 -53*x_t^3 +22*x_t^5 # F1
+
+#fx_t = sin(x_t*2*pi)+2*x_t^2    # F2
+
+fx_t = atan((x_t-0.5)*5)-x_t^2/3 # F3
+
+
+
+
+inov = arima.sim(n=t_len*1.2 , model=list(ar = c(alpha1, alpha2)), rand.gen = function(n, ...) rt(n, df = 3))
+														
+inov = inov[-(1:(t_len*0.2))]														
+
+
+y_t = fx_t + inov
+
+############## set up the model
+
+past_w=NULL; 
+past_z=NULL;  
+past_w=c(1, 2);     ######## current setting for AR(2) #######
+
+
+
+ts =y_t          # the vector of the response random variable, Y_t
+
+xregr=x_t         # xregr is the regressor data.frame, currently we investigate the case that there is one regressor
+
+n=length(ts)
+
+############## 
+############## Next, generate the B-spline basis matrix for a cubic polynomial spline 
+##############  
+
+J_n= 9
+
+
+xregr<-as.matrix(xregr)	  # xregr is the regressor data.frame, currently we investigate the case that there is one regressor
+
+xl <- min(xregr); xu <- max(xregr)
+nk=J_n+2
+
+xr <- xu - xl # data limits and range                           
+xl <- xl-xr*0.05; xu <- xu+xr*0.05; dx <- (xu-xl)/(max(nk-1, 1))      
+
+
+k_nt<- c( rep(xl, 3), quantile(xregr, seq(0.01, 0.99, length=nk)), rep(xu, 3))
+
+k_nt[4]<- xl ; k_nt[J_n+5]<- xu
+
+
+SS=splines::splineDesign(knots= k_nt, x = xregr, ord=4)  ## use SS to store the B-spline basis matrix
+
+SS=SS[,-1]    # the 'intercept' is dropped to avoid collinearity   
+
+
+############## model formulation:
+
+  p <- length(past_w)  # number of W_t(\beta) involved in the ARMA model, this p is lower case
+  P <- seq(along=numeric(p)) # sequence 1:p if p>0 and NULL otherwise, allow some lags of W_t(\zeta) to have coefficients zero; 
+	                           # this P is upper case
+	p_max <- max(past_w, 0)
+  P_max <- seq(along=numeric(p_max))
+	q <- length(past_z) # number of Z_t(\zeta)
+  Q <- seq(along=numeric(q)) #sequence 1:q if q>0 and NULL otherwise
+  q_max <- max(past_z, 0)
+  Q_max <- seq(along=numeric(q_max))
+  r = (dim(SS))[2] # the number of parameters for the regressor basis
+  
+ 
+##############  set the initial values of the parameter vector
+
+
+##############  set the initial values of the parameter vector
+############## 
+
+  R <- seq(along=numeric(r)) 
+	
+	param_start <- list(past_w=NULL, past_z=NULL, xregrc=NULL) 
+
+  
+	
+	param_start <- list(intercept=NULL, past_w=NULL, past_z=NULL, xregrc=NULL) 
+	
+	
+	sprg=lm(ts~SS)
+	
+	if ( !is.null(past_w) &  !is.null(past_z) ){
+	 od=max(past_w)+max(past_z)	
+	} else if (!is.null(past_w) & is.null(past_z)) {
+	 od=max(past_w)
+	} else if  (is.null(past_w) & !is.null(past_z)) {
+	 od=max(past_z)
+	} else {
+	cat('Please set the ARMA model', '\n')
+	}
+	
+	fx=rep(0, od+1)
+	fx[past_w]=NA
+	fx[p_max+past_z]=NA
+	fx[od+1]=0
+	
+	initial_arma=arima(residuals(sprg) ,order=c(p_max,0,q_max),fixed=fx)
+  	
+	param_start$past_w=initial_arma$coef[past_w]
+	param_start$past_z=initial_arma$coef[p_max+past_z]
+	param_start$xregrc=rep(1, dim(SS)[2])  ################## initial values 
+
+ 	 param_start$past_w=runif(2)         ############### initial values for AR(2)
+	 while (any(abs( polyroot(c(1, -param_start$past_w)))<1)){
+      param_start$past_w=runif(2)
+   }
+
+
+#####################################################################################################
+############## setup Wt, Z_t, the score vector
+############## 
+
+model <-list(past_w=past_w)
+
+paramvec <- unlist(param_start)
+
+xreg <- SS
+
+names(paramvec)=srarma.parameternames(model=model, xreg=xreg)
+
+######################################################################################################
+
+
+starting_value <- paramvec
+
+
+###############################################################################################
+
+f<-function(paramvec) srarma.rer(paramvec, model, ts, xreg)$srsq
+grad<-function(paramvec) srarma.rer(paramvec, model, ts, xreg)$score
+
+
+
+est_result_ini = optim(par=starting_value, fn=f, gr=grad, method="Nelder-Mead", control=list(maxit=1000, reltol=1e-8))
+
+est_result = optim(par=est_result_ini$par, fn=f, gr=grad, method="BFGS", control=list(maxit=20000, reltol=1e-12))
+
+cat(i, ' final BFGS estimates', est_result$par[1:2], '\n')
+
+
+
+######################################## compute the norm for g and g_hat
+
+SL=splines::splineDesign(knots= k_nt, x = seq(0, 1, len=2000), ord=4)
+SL=SL[,-1]
+fitted = SL%*%as.matrix(est_result$par[3:length(est_result$par)])+ mean(ts) - as.numeric(est_result$par[3:length(est_result$par)]%*%colMeans(SS)) 
+
+
+seq_fitted = SL%*%as.matrix(sprg$coeff[2:(ncol(SS)+1)])+sprg$coeff[1]
+
+xx=seq(0, 1, len=2000)
+
+#true_y =1-6*xx+36*xx^2 -53*xx^3 +22*xx^5              #######################F1
+# true_y = sin(xx*2*pi)+2*xx^2  #F2
+ true_y = atan((xx-0.5)*5)-xx^2/3 # F3
+
+difnorm <- sum(((true_y-fitted)^2)[-1]*diff(xx))      # rho, proposed method
+
+difnorm_seq <- sum(((true_y-seq_fitted)^2)[-1]*diff(xx)) #rho, sequential method
+
+
+
+
+idx=xx>0.1&xx<0.9
+true_y =true_y[idx]
+fitted = fitted[idx]
+seq_fitted=seq_fitted[idx]
+difnorm19 <- sum(((true_y-fitted)^2)[-1]*diff(xx[idx]))  # rho19
+difnorm_seq19 <- sum(((true_y-seq_fitted)^2)[-1]*diff(xx[idx])) # rho19
+
+
+coef_est_q=c(est_result$par[1:2], t_len)
+write.table( t(c(coef_est_q, difnorm, difnorm_seq, difnorm19, difnorm_seq19)), 
+     file="github AR(2) F3 jn9 .5.1 2000.txt", append = T,col.names = F, row.names = F)
+
+}
+
+t2000=read.table('github AR(2) F1 jn9 .5.1 2000.txt') 
+apply(t2000[,1:2], 2, mean)   # mean of estimates               
+apply(t2000[, 1:2], 2, sd)   # sd of estimated
+apply(t2000[, 4:7], 2, mean) # mean of the norm between g and g_hat
